@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kormány panel</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app" class="hidden">
+        <header>
+            <h1>Nyitott kormány panel</h1>
+            <button id="close-btn">Bezárás</button>
+        </header>
+        <main>
+            <section id="salary-section" class="card">
+                <h2>Fizetések</h2>
+                <p class="hint">Állítsd be az Ambulance, Police, BCSO, Army és Mechanic fizetéseket.</p>
+                <div id="salary-container"></div>
+            </section>
+            <section id="store-section" class="card">
+                <h2>Bolti árak</h2>
+                <p class="hint">Kategóriánkénti szorzók az árakhoz.</p>
+                <div id="store-container"></div>
+            </section>
+            <section id="allocation-section" class="card">
+                <h2>Állomány utalások</h2>
+                <p class="hint">Napi támogatások a frakcióknak.</p>
+                <div id="allocation-container"></div>
+            </section>
+            <section id="tax-section" class="card">
+                <h2>Adó beállítások</h2>
+                <form id="tax-form">
+                    <div class="field">
+                        <label for="tax-amount">Számla összege ($)</label>
+                        <input type="number" id="tax-amount" min="0" step="1" required>
+                    </div>
+                    <div class="field">
+                        <label for="tax-interval">Számlázási periódus (perc)</label>
+                        <input type="number" id="tax-interval" min="1" step="1" required>
+                    </div>
+                    <button type="submit">Adó frissítése</button>
+                </form>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
