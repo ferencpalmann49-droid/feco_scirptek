@@ -144,28 +144,57 @@ local function ensureStoreBasePrices(category, cb)
 
     for index, target in ipairs(categoryConfig.targets) do
         local targetKey = tostring(index)
-        if not SharedState.storeBasePrices[category][targetKey] then
-            pending = pending + 1
-            dbFetchAll(target.fetch, target.fetchParams, function(rows)
-                local baseMap = {}
-                if rows then
-                    for _, row in ipairs(rows) do
-                        local keyValue = row[target.keyColumn]
-                        local priceValue = tonumber(row[target.priceColumn])
-                        if keyValue ~= nil and priceValue then
-                            baseMap[tostring(keyValue)] = priceValue
+        SharedState.storeBasePrices[category][targetKey] = SharedState.storeBasePrices[category][targetKey] or {}
+
+        pending = pending + 1
+        dbFetchAll(target.fetch, target.fetchParams, function(rows)
+            local baseMap = SharedState.storeBasePrices[category][targetKey] or {}
+            local updated = false
+
+            if rows then
+                for _, row in ipairs(rows) do
+                    local keyValue = row[target.keyColumn]
+                    local priceValue = tonumber(row[target.priceColumn])
+                    if keyValue ~= nil and priceValue then
+                        local mapKey = tostring(keyValue)
+                        if baseMap[mapKey] == nil then
+                            baseMap[mapKey] = priceValue
+                            updated = true
                         end
                     end
                 end
-                SharedState.storeBasePrices[category][targetKey] = baseMap
+            end
+
+            SharedState.storeBasePrices[category][targetKey] = baseMap
+            if updated then
                 saveState()
-                pending = pending - 1
-                finishIfDone()
-            end)
-        end
+            end
+
+            pending = pending - 1
+            finishIfDone()
+        end)
     end
 
     finishIfDone()
+end
+
+local function runSequentialUpdates(entries, index, applied, cb)
+    if index > #entries then
+        if cb then
+            cb(applied)
+        end
+        return
+    end
+
+    local entry = entries[index]
+    dbExecute(entry.query, entry.params, function(rowsChanged)
+        local nextApplied = applied
+        if rowsChanged and rowsChanged > 0 then
+            nextApplied = true
+        end
+
+        runSequentialUpdates(entries, index + 1, nextApplied, cb)
+    end)
 end
 
 local function applyStoreMultiplier(category, cb)
@@ -196,6 +225,7 @@ local function applyStoreMultiplier(category, cb)
             local targetKey = tostring(index)
             local baseEntries = SharedState.storeBasePrices[category][targetKey]
             if baseEntries then
+                local updates = {}
                 for baseKey, basePrice in pairs(baseEntries) do
                     local original = tonumber(basePrice)
                     if original then
@@ -209,22 +239,29 @@ local function applyStoreMultiplier(category, cb)
                             params = { newPrice, baseKey }
                         end
 
-                        pending = pending + 1
-                        dbExecute(target.update, params, function(rowsChanged)
-                            if rowsChanged and rowsChanged > 0 then
-                                applied = true
-                            end
-                            pending = pending - 1
-                            if pending == 0 then
-                                done()
-                            end
-                        end)
+                        updates[#updates + 1] = {
+                            query = target.update,
+                            params = params
+                        }
                     end
+                end
+
+                if #updates > 0 then
+                    pending = pending + 1
+                    runSequentialUpdates(updates, 1, false, function(batchApplied)
+                        if batchApplied then
+                            applied = true
+                        end
+                        pending = pending - 1
+                        done()
+                    end)
                 end
             end
         end
 
-        done()
+        if pending == 0 then
+            done()
+        end
     end)
 end
 
@@ -283,51 +320,29 @@ local function updateJobSalary(jobName, grade, salary)
 end
 
 local function issueTaxInvoice(xPlayer, amount)
-    if not xPlayer or not xPlayer.identifier then return end
+    if not xPlayer then return end
 
-    local identifier = xPlayer.identifier
+    local playerSource = xPlayer.source
+    if not playerSource then return end
+
+    local invoiceAmount = tonumber(amount) or 0
+    if ESX and ESX.Math and ESX.Math.Round then
+        invoiceAmount = ESX.Math.Round(invoiceAmount)
+    else
+        invoiceAmount = math.floor(invoiceAmount + 0.5)
+    end
+
     local label = Config.DefaultTax.label
-    local deleteParams = {
-        ['@identifier'] = identifier,
-        ['@label'] = label
-    }
 
-    dbExecute('DELETE FROM billing WHERE identifier = @identifier AND label = @label', deleteParams, function()
-        local insertAdvanced = [[
-            INSERT INTO billing (identifier, sender, target_type, target, label, amount)
-            VALUES (@identifier, @sender, @target_type, @target, @label, @amount)
-        ]]
-        local advancedParams = {
-            ['@identifier'] = identifier,
-            ['@sender'] = Config.GovernmentJob.society,
-            ['@target_type'] = 'society',
-            ['@target'] = Config.GovernmentJob.society,
-            ['@label'] = label,
-            ['@amount'] = amount
-        }
+    if xPlayer.identifier then
+        dbExecute('DELETE FROM billing WHERE identifier = @identifier AND label = @label', {
+            ['@identifier'] = xPlayer.identifier,
+            ['@label'] = label
+        })
+    end
 
-        dbExecute(insertAdvanced, advancedParams, function(rowsChanged)
-            if rowsChanged and rowsChanged > 0 then
-                TriggerClientEvent('esx:showNotification', xPlayer.source, ('%s számla érkezett: $%s'):format(label, amount))
-                return
-            end
-
-            local fallbackQuery = 'INSERT INTO billing (identifier, label, amount) VALUES (@identifier, @label, @amount)'
-            local fallbackParams = {
-                ['@identifier'] = identifier,
-                ['@label'] = label,
-                ['@amount'] = amount
-            }
-
-            dbExecute(fallbackQuery, fallbackParams, function(fallbackRows)
-                if fallbackRows and fallbackRows > 0 then
-                    TriggerClientEvent('esx:showNotification', xPlayer.source, ('%s számla érkezett: $%s'):format(label, amount))
-                else
-                    print(('[feco_govpanel] Nem sikerült adó számlát létrehozni: %s'):format(identifier))
-                end
-            end)
-        end)
-    end)
+    TriggerEvent('esx_billing:sendBill', playerSource, Config.GovernmentJob.society, label, invoiceAmount)
+    TriggerClientEvent('esx:showNotification', playerSource, ('%s számla érkezett: $%s'):format(label, invoiceAmount))
 end
 
 local function distributeAllocations()

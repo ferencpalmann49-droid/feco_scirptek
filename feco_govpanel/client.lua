@@ -37,7 +37,7 @@ RegisterCommand('opengov', function()
     TriggerServerEvent('feco_govpanel:requestOpen')
 end)
 
-RegisterKeyMapping('opengov', 'Kormány panel megnyitása', 'keyboard', 'F7')
+RegisterKeyMapping('opengov', 'Kormány panel megnyitása', 'keyboard', 'F9')
 
 local panelOpen = false
 
