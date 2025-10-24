@@ -106,18 +106,18 @@ local function isAuthorized(xPlayer)
 end
 
 local function updateJobSalary(jobName, grade, salary)
+    local function onResult(rowsChanged)
+        if (rowsChanged or 0) == 0 then
+            print(('[feco_govpanel] Nem talált job_grades sor: %s %s'):format(jobName, grade))
+        end
+    end
+
     if MySQL and MySQL.update then
-        MySQL.update('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, function(rowsChanged)
-            if rowsChanged == 0 then
-                print(('[feco_govpanel] Nem talált job_grades sor: %s %s'):format(jobName, grade))
-            end
-        end)
-    elseif exports and exports.oxmysql and exports.oxmysql.update then
-        exports.oxmysql:update('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, function(rowsChanged)
-            if rowsChanged == 0 then
-                print(('[feco_govpanel] Nem talált job_grades sor: %s %s'):format(jobName, grade))
-            end
-        end)
+        MySQL.update('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
+    elseif MySQL and MySQL.Async and MySQL.Async.execute then
+        MySQL.Async.execute('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
+    elseif exports and exports.oxmysql and exports.oxmysql.execute then
+        exports.oxmysql:execute('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
     else
         print('[feco_govpanel] Figyelem: nem található adatbázis modul (mysql-async vagy oxmysql). A fizetés változás csak memóriában történt meg.')
     end
