@@ -1,6 +1,5 @@
-local Config = Config
-
 local ESX
+
 TriggerEvent('esx:getSharedObject', function(obj)
     ESX = obj
 end)
@@ -10,8 +9,49 @@ local SharedState = {
     salaries = {},
     storePrices = {},
     allocations = {},
-    tax = {}
+    tax = {},
+    storeBasePrices = {}
 }
+
+local function dbFetchAll(query, params, cb)
+    if MySQL and MySQL.Async and MySQL.Async.fetchAll then
+        MySQL.Async.fetchAll(query, params, function(result)
+            if cb then
+                cb(result or {})
+            end
+        end)
+    elseif MySQL and MySQL.Sync and MySQL.Sync.fetchAll then
+        local result = MySQL.Sync.fetchAll(query, params)
+        if cb then
+            cb(result or {})
+        end
+    else
+        print(('[feco_govpanel] Figyelem: mysql-async fetch nem érhető el (%s)'):format(query))
+        if cb then
+            cb({})
+        end
+    end
+end
+
+local function dbExecute(query, params, cb)
+    if MySQL and MySQL.Async and MySQL.Async.execute then
+        MySQL.Async.execute(query, params, function(rowsChanged)
+            if cb then
+                cb(rowsChanged or 0)
+            end
+        end)
+    elseif MySQL and MySQL.Sync and MySQL.Sync.execute then
+        local rowsChanged = MySQL.Sync.execute(query, params)
+        if cb then
+            cb(rowsChanged or 0)
+        end
+    else
+        print(('[feco_govpanel] Figyelem: mysql-async execute nem érhető el (%s)'):format(query))
+        if cb then
+            cb(0)
+        end
+    end
+end
 
 local function getOnlinePlayers()
     if ESX and ESX.GetExtendedPlayers then
@@ -45,10 +85,12 @@ local function ensureDefaults()
     end
 
     SharedState.storePrices = SharedState.storePrices or {}
+    SharedState.storeBasePrices = SharedState.storeBasePrices or {}
     for category, data in pairs(Config.StoreCategories) do
         if SharedState.storePrices[category] == nil then
             SharedState.storePrices[category] = data.multiplier or 1.0
         end
+        SharedState.storeBasePrices[category] = SharedState.storeBasePrices[category] or {}
     end
 
     SharedState.allocations = SharedState.allocations or {}
@@ -80,6 +122,118 @@ local function saveState()
     SaveResourceFile(GetCurrentResourceName(), DATA_FILE, encoded or '{}', -1)
 end
 
+local function ensureStoreBasePrices(category, cb)
+    local categoryConfig = Config.StoreCategories[category]
+    if not categoryConfig or not categoryConfig.targets or #categoryConfig.targets == 0 then
+        if cb then cb() end
+        return
+    end
+
+    SharedState.storeBasePrices = SharedState.storeBasePrices or {}
+    SharedState.storeBasePrices[category] = SharedState.storeBasePrices[category] or {}
+
+    local pending = 0
+    local completed = false
+
+    local function finishIfDone()
+        if pending == 0 and not completed then
+            completed = true
+            if cb then cb() end
+        end
+    end
+
+    for index, target in ipairs(categoryConfig.targets) do
+        local targetKey = tostring(index)
+        if not SharedState.storeBasePrices[category][targetKey] then
+            pending = pending + 1
+            dbFetchAll(target.fetch, target.fetchParams, function(rows)
+                local baseMap = {}
+                if rows then
+                    for _, row in ipairs(rows) do
+                        local keyValue = row[target.keyColumn]
+                        local priceValue = tonumber(row[target.priceColumn])
+                        if keyValue ~= nil and priceValue then
+                            baseMap[tostring(keyValue)] = priceValue
+                        end
+                    end
+                end
+                SharedState.storeBasePrices[category][targetKey] = baseMap
+                saveState()
+                pending = pending - 1
+                finishIfDone()
+            end)
+        end
+    end
+
+    finishIfDone()
+end
+
+local function applyStoreMultiplier(category, cb)
+    local categoryConfig = Config.StoreCategories[category]
+    if not categoryConfig then
+        if cb then cb(false) end
+        return
+    end
+
+    ensureStoreBasePrices(category, function()
+        if not categoryConfig.targets or #categoryConfig.targets == 0 then
+            if cb then cb(true) end
+            return
+        end
+
+        local multiplier = tonumber(SharedState.storePrices[category]) or categoryConfig.multiplier or 1.0
+        if multiplier < 0 then multiplier = 0 end
+
+        local pending = 0
+        local applied = false
+        local function done()
+            if pending == 0 and cb then
+                cb(applied)
+            end
+        end
+
+        for index, target in ipairs(categoryConfig.targets) do
+            local targetKey = tostring(index)
+            local baseEntries = SharedState.storeBasePrices[category][targetKey]
+            if baseEntries then
+                for baseKey, basePrice in pairs(baseEntries) do
+                    local original = tonumber(basePrice)
+                    if original then
+                        local newPrice = math.max(0, math.floor(original * multiplier + 0.5))
+                        local params
+                        if target.buildUpdateParams then
+                            params = target.buildUpdateParams(newPrice, baseKey)
+                        elseif target.updateParams then
+                            params = target.updateParams(newPrice, baseKey)
+                        else
+                            params = { newPrice, baseKey }
+                        end
+
+                        pending = pending + 1
+                        dbExecute(target.update, params, function(rowsChanged)
+                            if rowsChanged and rowsChanged > 0 then
+                                applied = true
+                            end
+                            pending = pending - 1
+                            if pending == 0 then
+                                done()
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+
+        done()
+    end)
+end
+
+local function refreshAllStoreMultipliers()
+    for category in pairs(Config.StoreCategories) do
+        applyStoreMultiplier(category)
+    end
+end
+
 local function getPanelData()
     return {
         salaries = SharedState.salaries,
@@ -106,21 +260,18 @@ local function isAuthorized(xPlayer)
 end
 
 local function updateJobSalary(jobName, grade, salary)
-    local function onResult(rowsChanged)
+    local query = 'UPDATE job_grades SET salary = @salary WHERE job_name = @job_name AND grade = @grade'
+    local params = {
+        ['@salary'] = salary,
+        ['@job_name'] = jobName,
+        ['@grade'] = grade
+    }
+
+    dbExecute(query, params, function(rowsChanged)
         if (rowsChanged or 0) == 0 then
             print(('[feco_govpanel] Nem talált job_grades sor: %s %s'):format(jobName, grade))
         end
-    end
-
-    if MySQL and MySQL.update then
-        MySQL.update('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
-    elseif MySQL and MySQL.Async and MySQL.Async.execute then
-        MySQL.Async.execute('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
-    elseif exports and exports.oxmysql and exports.oxmysql.execute then
-        exports.oxmysql:execute('UPDATE job_grades SET salary = ? WHERE job_name = ? AND grade = ?', { salary, jobName, grade }, onResult)
-    else
-        print('[feco_govpanel] Figyelem: nem található adatbázis modul (mysql-async vagy oxmysql). A fizetés változás csak memóriában történt meg.')
-    end
+    end)
 
     if ESX then
         if ESX.RefreshJobs then
@@ -129,6 +280,54 @@ local function updateJobSalary(jobName, grade, salary)
             TriggerEvent('esx:refreshJobs')
         end
     end
+end
+
+local function issueTaxInvoice(xPlayer, amount)
+    if not xPlayer or not xPlayer.identifier then return end
+
+    local identifier = xPlayer.identifier
+    local label = Config.DefaultTax.label
+    local deleteParams = {
+        ['@identifier'] = identifier,
+        ['@label'] = label
+    }
+
+    dbExecute('DELETE FROM billing WHERE identifier = @identifier AND label = @label', deleteParams, function()
+        local insertAdvanced = [[
+            INSERT INTO billing (identifier, sender, target_type, target, label, amount)
+            VALUES (@identifier, @sender, @target_type, @target, @label, @amount)
+        ]]
+        local advancedParams = {
+            ['@identifier'] = identifier,
+            ['@sender'] = Config.GovernmentJob.society,
+            ['@target_type'] = 'society',
+            ['@target'] = Config.GovernmentJob.society,
+            ['@label'] = label,
+            ['@amount'] = amount
+        }
+
+        dbExecute(insertAdvanced, advancedParams, function(rowsChanged)
+            if rowsChanged and rowsChanged > 0 then
+                TriggerClientEvent('esx:showNotification', xPlayer.source, ('%s számla érkezett: $%s'):format(label, amount))
+                return
+            end
+
+            local fallbackQuery = 'INSERT INTO billing (identifier, label, amount) VALUES (@identifier, @label, @amount)'
+            local fallbackParams = {
+                ['@identifier'] = identifier,
+                ['@label'] = label,
+                ['@amount'] = amount
+            }
+
+            dbExecute(fallbackQuery, fallbackParams, function(fallbackRows)
+                if fallbackRows and fallbackRows > 0 then
+                    TriggerClientEvent('esx:showNotification', xPlayer.source, ('%s számla érkezett: $%s'):format(label, amount))
+                else
+                    print(('[feco_govpanel] Nem sikerült adó számlát létrehozni: %s'):format(identifier))
+                end
+            end)
+        end)
+    end)
 end
 
 local function distributeAllocations()
@@ -165,12 +364,9 @@ end
 local function chargeTaxes()
     if not ESX then return end
     local invoiceAmount = tonumber(SharedState.tax.amount) or Config.DefaultTax.amount
-    local society = Config.GovernmentJob.society
 
-    local players = getOnlinePlayers()
-    for _, xPlayer in pairs(players) do
-        TriggerEvent('esx_billing:sendBill', xPlayer.source, society, Config.DefaultTax.label, invoiceAmount)
-        TriggerClientEvent('esx:showNotification', xPlayer.source, ('%s számla érkezett: $%s'):format(Config.DefaultTax.label, invoiceAmount))
+    for _, xPlayer in pairs(getOnlinePlayers()) do
+        issueTaxInvoice(xPlayer, invoiceAmount)
     end
 end
 
@@ -256,8 +452,14 @@ RegisterNetEvent('feco_govpanel:updateStorePrice', function(category, multiplier
     SharedState.storePrices[category] = multiplier
     saveState()
 
-    TriggerClientEvent('esx:showNotification', src, ("%s új szorzója: %.2f"):format(limits.label, multiplier))
-    sendStateToPlayer(src, true)
+    applyStoreMultiplier(category, function(applied)
+        if applied then
+            TriggerClientEvent('esx:showNotification', src, ("%s új szorzója: %.2f"):format(limits.label, multiplier))
+        else
+            TriggerClientEvent('esx:showNotification', src, string.format('%s szorzó frissítve (adatbázis változás nem szükséges vagy sikertelen).', limits.label))
+        end
+        sendStateToPlayer(src, true)
+    end)
 end)
 
 RegisterNetEvent('feco_govpanel:updateAllocation', function(jobName, amount)
@@ -302,6 +504,7 @@ end)
 AddEventHandler('onResourceStart', function(resName)
     if resName ~= GetCurrentResourceName() then return end
     loadState()
+    refreshAllStoreMultipliers()
     startTimers()
 end)
 

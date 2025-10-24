@@ -95,14 +95,42 @@ Config.StoreCategories = {
         description = 'Általános jármű ár szorzója a kereskedésekhez.',
         multiplier = 1.0,
         minimum = 0.5,
-        maximum = 3.0
+        maximum = 3.0,
+        targets = {
+            {
+                fetch = 'SELECT model, price FROM vehicles',
+                keyColumn = 'model',
+                priceColumn = 'price',
+                update = 'UPDATE vehicles SET price = @price WHERE model = @model',
+                buildUpdateParams = function(price, key)
+                    return {
+                        ['@price'] = price,
+                        ['@model'] = key
+                    }
+                end
+            }
+        }
     },
     general_store = {
         label = 'Bolt',
         description = 'Alapvető fogyasztási cikkek ár szorzója.',
         multiplier = 1.0,
         minimum = 0.5,
-        maximum = 3.0
+        maximum = 3.0,
+        targets = {
+            {
+                fetch = 'SELECT item, price FROM shops',
+                keyColumn = 'item',
+                priceColumn = 'price',
+                update = 'UPDATE shops SET price = @price WHERE item = @item',
+                buildUpdateParams = function(price, key)
+                    return {
+                        ['@price'] = price,
+                        ['@item'] = key
+                    }
+                end
+            }
+        }
     },
     wages = {
         label = 'Fizetések adója',
@@ -143,4 +171,3 @@ Config.DefaultTax = {
 }
 
 Config.AllocationIntervalMinutes = 1440
-
